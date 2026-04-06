@@ -1,4 +1,5 @@
 import nodemailer from "nodemailer";
+import SMTPTransport from "nodemailer/lib/smtp-transport";
 import { getSmtpConfig } from "../config/env";
 import { logServerError } from "../utils/serverLogger";
 
@@ -15,20 +16,25 @@ function getTransporter() {
   }
 
   const smtp = getSmtpConfig();
+  const transportOptions: SMTPTransport.Options = {
+    host: smtp.host,
+    port: smtp.port,
+    secure: smtp.secure,
+    auth: {
+      user: smtp.user,
+      pass: smtp.password
+    },
+    tls: {
+      servername: smtp.host
+    }
+  };
+
+  // Render may attempt IPv6 first for some SMTP hosts; forcing IPv4 avoids ENETUNREACH.
+  (transportOptions as SMTPTransport.Options & { family?: number }).family = 4;
+
   cachedTransporter = {
     fromEmail: smtp.user,
-    transporter: nodemailer.createTransport({
-      host: smtp.host,
-      port: smtp.port,
-      secure: smtp.secure,
-      auth: {
-        user: smtp.user,
-        pass: smtp.password
-      },
-      tls: {
-        servername: smtp.host
-      }
-    })
+    transporter: nodemailer.createTransport(transportOptions)
   };
 
   return cachedTransporter;
