@@ -29,18 +29,21 @@ export function getSmtpConfig() {
   const port = optionalEnv("SMTP_EMAIL_PORT");
   const user = optionalEnv("SMTP_EMAIL_USER");
   const password = optionalEnv("SMTP_EMAIL_PASSWORD");
+  const secure = optionalEnv("SMTP_EMAIL_SECURE");
 
   if (!host || !port || !user || !password) {
     throw new Error("SMTP configuration is incomplete");
   }
-  console.log("EMAIL_USER:", process.env.SMTP_EMAIL_USER);
-  console.log("EMAIL_PASS:", process.env.SMTP_EMAIL_PASSWORD);
-  console.log("EMAIL_USER:", process.env.SMTP_EMAIL_PORT);
-  console.log("EMAIL_PASS:", process.env.SMTP_EMAIL_HOST);
+
+  const parsedPort = Number(port);
+  if (Number.isNaN(parsedPort) || parsedPort <= 0) {
+    throw new Error("SMTP_EMAIL_PORT must be a valid number");
+  }
+
   return {
     host,
-    port: Number(port),
-    secure: process.env.SMTP_EMAIL_SECURE === "true",
+    port: parsedPort,
+    secure: secure ? secure === "true" : parsedPort === 465,
     user,
     password
   };

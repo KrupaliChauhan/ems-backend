@@ -1,5 +1,4 @@
 import fs from "node:fs/promises";
-import nodemailer from "nodemailer";
 import type { Types } from "mongoose";
 import Announcement, { type AnnouncementDocument } from "../models/Announcement";
 import AnnouncementReceipt from "../models/AnnouncementReceipt";
@@ -16,7 +15,9 @@ import type { AppRole } from "../constants/roles";
 import { APP_NOTIFICATION_TYPES } from "../models/AppNotification";
 import { endOfDay, startOfDay } from "./leaveService";
 import { getCommunicationFilePublicUrl } from "../middleware/uploadCommunicationAssets";
-import { env, getSmtpConfig } from "../config/env";
+import { env } from "../config/env";
+import { sendEmail } from "./mailService";
+import { logServerError } from "../utils/serverLogger";
 
 export type UploadPayload = {
   originalName: string;
@@ -58,31 +59,6 @@ type MailUser = {
 };
 
 const POLICY_RECIPIENT_ROLES: AppRole[] = ["employee", "teamLeader"];
-
-let cachedTransporter:
-  | {
-      transporter: nodemailer.Transporter;
-      fromEmail: string;
-    }
-  | null = null;
-
-function getTransporter() {
-  if (cachedTransporter) return cachedTransporter;
-  const smtp = getSmtpConfig();
-  cachedTransporter = {
-    fromEmail: smtp.user,
-    transporter: nodemailer.createTransport({
-      host: smtp.host,
-      port: smtp.port,
-      secure: smtp.secure,
-      auth: {
-        user: smtp.user,
-        pass: smtp.password
-      }
-    })
-  };
-  return cachedTransporter;
-}
 
 function stripDangerousHtml(value: string) {
   return value
@@ -476,20 +452,26 @@ async function sendEmailBatch(params: {
 }) {
   if (params.users.length === 0) return;
 
-  try {
-    const { fromEmail, transporter } = getTransporter();
-    await Promise.allSettled(
-      params.users.map((user) =>
-        transporter.sendMail({
-          from: `"EMS System" <${fromEmail}>`,
+  const results = await Promise.allSettled(
+    params.users.map((user) =>
+      sendEmail({
+          context: `communications.sendEmailBatch:${params.subject}`,
           to: user.email,
           subject: params.subject,
           html: params.html.replace(/\{\{name\}\}/g, user.name || user.email)
         })
-      )
+    )
+  );
+
+  const failedCount = results.filter(
+    (result) => result.status === "rejected" || result.value === false
+  ).length;
+
+  if (failedCount > 0) {
+    logServerError(
+      "communications.sendEmailBatch",
+      new Error(`Failed to send ${failedCount} email(s) for subject "${params.subject}"`)
     );
-  } catch {
-    // email failures should not block core flow
   }
 }
 
