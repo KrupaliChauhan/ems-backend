@@ -33,8 +33,10 @@ export function getSmtpConfig() {
   if (!host || !port || !user || !password) {
     throw new Error("SMTP configuration is incomplete");
   }
-  console.log("EMAIL_USER:", process.env.EMAIL_USER);
-  console.log("EMAIL_PASS:", process.env.EMAIL_PASS);
+  console.log("EMAIL_USER:", process.env.SMTP_EMAIL_USER);
+  console.log("EMAIL_PASS:", process.env.SMTP_EMAIL_PASSWORD);
+  console.log("EMAIL_USER:", process.env.SMTP_EMAIL_PORT);
+  console.log("EMAIL_PASS:", process.env.SMTP_EMAIL_HOST);
   return {
     host,
     port: Number(port),
