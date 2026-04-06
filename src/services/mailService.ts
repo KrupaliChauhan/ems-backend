@@ -11,12 +11,9 @@ let cachedTransporter:
     }
   | null = null;
 
-async function getTransporter() {
-  if (cachedTransporter) {
-    return cachedTransporter;
-  }
+type SmtpConfig = ReturnType<typeof getSmtpConfig>;
 
-  const smtp = getSmtpConfig();
+async function buildTransporter(smtp: SmtpConfig, overrides?: Partial<SMTPTransport.Options>) {
   const resolvedHost = await lookup(smtp.host, { family: 4 });
   const transportOptions: SMTPTransport.Options = {
     host: resolvedHost.address,
@@ -28,12 +25,22 @@ async function getTransporter() {
     },
     tls: {
       servername: smtp.host
-    }
+    },
+    ...overrides
   };
 
+  return nodemailer.createTransport(transportOptions);
+}
+
+async function getTransporter() {
+  if (cachedTransporter) {
+    return cachedTransporter;
+  }
+
+  const smtp = getSmtpConfig();
   cachedTransporter = {
     fromEmail: smtp.user,
-    transporter: nodemailer.createTransport(transportOptions)
+    transporter: await buildTransporter(smtp)
   };
 
   return cachedTransporter;
@@ -45,6 +52,8 @@ export async function sendEmail(params: {
   html: string;
   context: string;
 }) {
+  const smtp = getSmtpConfig();
+
   try {
     const { fromEmail, transporter } = await getTransporter();
     await transporter.sendMail({
@@ -56,6 +65,35 @@ export async function sendEmail(params: {
     return true;
   } catch (error) {
     logServerError(params.context, error);
-    return false;
+
+    const shouldTryTlsFallback = smtp.port === 465 && smtp.secure;
+    if (!shouldTryTlsFallback) {
+      return false;
+    }
+
+    try {
+      const fallbackTransporter = await buildTransporter(smtp, {
+        port: 587,
+        secure: false,
+        requireTLS: true
+      });
+
+      await fallbackTransporter.sendMail({
+        from: `"EMS System" <${smtp.user}>`,
+        to: params.to,
+        subject: params.subject,
+        html: params.html
+      });
+
+      cachedTransporter = {
+        fromEmail: smtp.user,
+        transporter: fallbackTransporter
+      };
+
+      return true;
+    } catch (fallbackError) {
+      logServerError(`${params.context}.fallback587`, fallbackError);
+      return false;
+    }
   }
 }
