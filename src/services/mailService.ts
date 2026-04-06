@@ -1,3 +1,4 @@
+import { lookup } from "node:dns/promises";
 import nodemailer from "nodemailer";
 import SMTPTransport from "nodemailer/lib/smtp-transport";
 import { getSmtpConfig } from "../config/env";
@@ -10,14 +11,15 @@ let cachedTransporter:
     }
   | null = null;
 
-function getTransporter() {
+async function getTransporter() {
   if (cachedTransporter) {
     return cachedTransporter;
   }
 
   const smtp = getSmtpConfig();
+  const resolvedHost = await lookup(smtp.host, { family: 4 });
   const transportOptions: SMTPTransport.Options = {
-    host: smtp.host,
+    host: resolvedHost.address,
     port: smtp.port,
     secure: smtp.secure,
     auth: {
@@ -28,9 +30,6 @@ function getTransporter() {
       servername: smtp.host
     }
   };
-
-  // Render may attempt IPv6 first for some SMTP hosts; forcing IPv4 avoids ENETUNREACH.
-  (transportOptions as SMTPTransport.Options & { family?: number }).family = 4;
 
   cachedTransporter = {
     fromEmail: smtp.user,
@@ -47,7 +46,7 @@ export async function sendEmail(params: {
   context: string;
 }) {
   try {
-    const { fromEmail, transporter } = getTransporter();
+    const { fromEmail, transporter } = await getTransporter();
     await transporter.sendMail({
       from: `"EMS System" <${fromEmail}>`,
       to: params.to,
