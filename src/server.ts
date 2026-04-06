@@ -28,7 +28,7 @@ const allowedOrigins = [env.frontendUrl];
 
 app.use(
   cors({
-    origin: ["https://ems-frontend-amber.vercel.app"],
+    origin: [env.frontendUrl],
     methods: ["GET", "POST", "PUT", "DELETE"],
     credentials: true
   })
