@@ -1,12 +1,13 @@
 import bcrypt from "bcryptjs";
 import crypto from "crypto";
+import nodemailer from "nodemailer";
 import mongoose from "mongoose";
 
+import { getSmtpConfig } from "../config/env";
 import type { AppRole } from "../constants/roles";
 import Department from "../models/Department";
 import Designation from "../models/Designation";
 import User from "../models/User";
-import { sendEmail } from "./mailService";
 
 const SUPER_ADMIN_ROLE: AppRole = "superadmin";
 const ADMIN_ROLE: AppRole = "admin";
@@ -46,6 +47,23 @@ export class UserServiceError extends Error {
     super(message);
     this.statusCode = statusCode;
   }
+}
+
+function buildTransporter() {
+  const smtp = getSmtpConfig();
+
+  return {
+    smtp,
+    transporter: nodemailer.createTransport({
+      host: smtp.host,
+      port: smtp.port,
+      secure: smtp.secure,
+      auth: {
+        user: smtp.user,
+        pass: smtp.password
+      }
+    })
+  };
 }
 
 function normalizeEmail(email: string) {
@@ -112,8 +130,11 @@ async function resolveUserRelations(role: AppRole, departmentId?: string | null,
 }
 
 function sendAccountCreationEmail(email: string, rawPassword: string) {
-  void sendEmail({
-      context: "users.create.sendMail",
+  const { smtp, transporter } = buildTransporter();
+
+  void transporter
+    .sendMail({
+      from: `"EMS System" <${smtp.user}>`,
       to: email,
       subject: "EMS Account Created",
       html: `
@@ -122,6 +143,9 @@ function sendAccountCreationEmail(email: string, rawPassword: string) {
         <p><b>Password:</b> ${rawPassword}</p>
         <p>Please change your password after first login.</p>
       `
+    })
+    .catch((error) => {
+      console.error("Failed to send account creation email", error);
     });
 }
 

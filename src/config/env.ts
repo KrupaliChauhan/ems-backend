@@ -21,7 +21,7 @@ export const env = {
   port: Number(process.env.PORT || 5000),
   mongoUri: requireEnv("MONGO_URI"),
   jwtSecret: requireEnv("JWT_SECRET"),
-  frontendUrl: requireEnv("FRONTEND_URL")
+  frontendUrl: requireEnv("FRONTEND_URL"),
 };
 
 export function getSmtpConfig() {
@@ -29,22 +29,16 @@ export function getSmtpConfig() {
   const port = optionalEnv("SMTP_EMAIL_PORT");
   const user = optionalEnv("SMTP_EMAIL_USER");
   const password = optionalEnv("SMTP_EMAIL_PASSWORD");
-  const secure = optionalEnv("SMTP_EMAIL_SECURE");
 
   if (!host || !port || !user || !password) {
     throw new Error("SMTP configuration is incomplete");
   }
 
-  const parsedPort = Number(port);
-  if (Number.isNaN(parsedPort) || parsedPort <= 0) {
-    throw new Error("SMTP_EMAIL_PORT must be a valid number");
-  }
-
   return {
     host,
-    port: parsedPort,
-    secure: secure ? secure === "true" : parsedPort === 465,
+    port: Number(port),
+    secure: process.env.SMTP_EMAIL_SECURE === "true",
     user,
-    password
+    password,
   };
 }
