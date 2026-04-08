@@ -1,13 +1,12 @@
 import bcrypt from "bcryptjs";
 import crypto from "crypto";
-import nodemailer from "nodemailer";
 import mongoose from "mongoose";
 
-import { getSmtpConfig } from "../config/env";
 import type { AppRole } from "../constants/roles";
 import Department from "../models/Department";
 import Designation from "../models/Designation";
 import User from "../models/User";
+import { sendEmail } from "./mailService";
 
 const SUPER_ADMIN_ROLE: AppRole = "superadmin";
 const ADMIN_ROLE: AppRole = "admin";
@@ -47,23 +46,6 @@ export class UserServiceError extends Error {
     super(message);
     this.statusCode = statusCode;
   }
-}
-
-function buildTransporter() {
-  const smtp = getSmtpConfig();
-
-  return {
-    smtp,
-    transporter: nodemailer.createTransport({
-      host: smtp.host,
-      port: smtp.port,
-      secure: smtp.secure,
-      auth: {
-        user: smtp.user,
-        pass: smtp.password
-      }
-    })
-  };
 }
 
 function normalizeEmail(email: string) {
@@ -130,23 +112,19 @@ async function resolveUserRelations(role: AppRole, departmentId?: string | null,
 }
 
 function sendAccountCreationEmail(email: string, rawPassword: string) {
-  const { smtp, transporter } = buildTransporter();
-
-  void transporter
-    .sendMail({
-      from: `"EMS System" <${smtp.user}>`,
-      to: email,
-      subject: "EMS Account Created",
-      html: `
-        <h3>Your EMS Account Details</h3>
-        <p><b>Username:</b> ${email}</p>
-        <p><b>Password:</b> ${rawPassword}</p>
-        <p>Please change your password after first login.</p>
-      `
-    })
-    .catch((error) => {
-      console.error("Failed to send account creation email", error);
-    });
+  void sendEmail({
+    to: email,
+    subject: "EMS Account Created",
+    htmlContent: `
+      <h3>Your EMS Account Details</h3>
+      <p><b>Username:</b> ${email}</p>
+      <p><b>Password:</b> ${rawPassword}</p>
+      <p>Please change your password after first login.</p>
+    `,
+    context: "user.create.accountEmail"
+  }).catch((error) => {
+    console.error("Failed to send account creation email", error);
+  });
 }
 
 export async function createUserAccount(input: UserMutationInput) {

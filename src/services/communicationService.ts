@@ -1,5 +1,4 @@
 import fs from "node:fs/promises";
-import nodemailer from "nodemailer";
 import type { Types } from "mongoose";
 import Announcement, { type AnnouncementDocument } from "../models/Announcement";
 import AnnouncementReceipt from "../models/AnnouncementReceipt";
@@ -16,7 +15,8 @@ import type { AppRole } from "../constants/roles";
 import { APP_NOTIFICATION_TYPES } from "../models/AppNotification";
 import { endOfDay, startOfDay } from "./leaveService";
 import { getCommunicationFilePublicUrl } from "../middleware/uploadCommunicationAssets";
-import { env, getSmtpConfig } from "../config/env";
+import { env } from "../config/env";
+import { sendEmailBatch as sendBrevoEmailBatch } from "./mailService";
 
 export type UploadPayload = {
   originalName: string;
@@ -58,31 +58,6 @@ type MailUser = {
 };
 
 const POLICY_RECIPIENT_ROLES: AppRole[] = ["employee", "teamLeader"];
-
-let cachedTransporter:
-  | {
-      transporter: nodemailer.Transporter;
-      fromEmail: string;
-    }
-  | null = null;
-
-function getTransporter() {
-  if (cachedTransporter) return cachedTransporter;
-  const smtp = getSmtpConfig();
-  cachedTransporter = {
-    fromEmail: smtp.user,
-    transporter: nodemailer.createTransport({
-      host: smtp.host,
-      port: smtp.port,
-      secure: smtp.secure,
-      auth: {
-        user: smtp.user,
-        pass: smtp.password
-      }
-    })
-  };
-  return cachedTransporter;
-}
 
 function stripDangerousHtml(value: string) {
   return value
@@ -390,7 +365,7 @@ export async function notifyPolicyUsers(params: {
   const users = await getPolicyRecipientUsers();
   if (users.length === 0) return;
 
-  await sendEmailBatch({
+  await deliverEmailBatch({
     users: users.map((user) => ({
       _id: user._id,
       name: user.name,
@@ -469,7 +444,7 @@ function buildEventReminderDueAt(
   }
 }
 
-async function sendEmailBatch(params: {
+async function deliverEmailBatch(params: {
   users: MailUser[];
   subject: string;
   html: string;
@@ -477,17 +452,15 @@ async function sendEmailBatch(params: {
   if (params.users.length === 0) return;
 
   try {
-    const { fromEmail, transporter } = getTransporter();
-    await Promise.allSettled(
-      params.users.map((user) =>
-        transporter.sendMail({
-          from: `"EMS System" <${fromEmail}>`,
-          to: user.email,
-          subject: params.subject,
-          html: params.html.replace(/\{\{name\}\}/g, user.name || user.email)
-        })
-      )
-    );
+    await sendBrevoEmailBatch({
+      recipients: params.users.map((user) => ({
+        email: user.email,
+        name: user.name
+      })),
+      subject: params.subject,
+      htmlContent: params.html,
+      context: "communication.sendEmailBatch"
+    });
   } catch {
     // email failures should not block core flow
   }
@@ -625,7 +598,7 @@ export async function syncAnnouncementDistribution(
       .select("_id name email")
       .lean();
 
-    await sendEmailBatch({
+    await deliverEmailBatch({
       users: users.map((user) => ({
         _id: user._id,
         name: user.name,
@@ -710,7 +683,7 @@ export async function syncEventDistribution(
       .select("_id name email")
       .lean();
 
-    await sendEmailBatch({
+    await deliverEmailBatch({
       users: users.map((user) => ({
         _id: user._id,
         name: user.name,
@@ -854,7 +827,7 @@ export async function processCommunicationAutomation() {
       }
 
       if ((reminder.channels || []).includes("email")) {
-        await sendEmailBatch({
+        await deliverEmailBatch({
           users: users.map((user) => ({
             _id: user._id,
             name: user.name,

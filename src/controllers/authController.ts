@@ -2,11 +2,11 @@ import { Request, Response } from "express";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import crypto from "crypto";
-import nodemailer from "nodemailer";
 import User from "../models/User";
 import { badRequest, forbidden, ok, serverError } from "../utils/apiResponse";
-import { env, getSmtpConfig } from "../config/env";
+import { env } from "../config/env";
 import { recordAuditLog } from "../services/auditService";
+import { sendEmail } from "../services/mailService";
 import { logServerError } from "../utils/serverLogger";
 
 export const login = async (req: Request, res: Response) => {
@@ -68,23 +68,10 @@ export const forgotPassword = async (req: Request, res: Response) => {
     await user.save();
 
     const resetLink = `${env.frontendUrl}/reset-password?token=${rawToken}`;
-    const smtp = getSmtpConfig();
-
-    const transporter = nodemailer.createTransport({
-      host: smtp.host,
-      port: smtp.port,
-      secure: smtp.secure,
-      auth: {
-        user: smtp.user,
-        pass: smtp.password
-      }
-    });
-
-    await transporter.sendMail({
-      from: `"EMS System" <${smtp.user}>`,
+    const emailSent = await sendEmail({
       to: email,
       subject: "Reset your EMS password",
-      html: `
+      htmlContent: `
         <div style="font-family: Arial, sans-serif; line-height: 1.5;">
           <h2>Reset Password</h2>
           <p>You requested to reset your EMS password.</p>
@@ -96,8 +83,13 @@ export const forgotPassword = async (req: Request, res: Response) => {
           <p>This link will expire in <b>15 minutes</b>.</p>
           <p>If you did not request this, you can ignore this email.</p>
         </div>
-      `
+      `,
+      context: "auth.forgotPassword.email"
     });
+
+    if (!emailSent) {
+      return serverError(res, "Failed to process forgot password request");
+    }
 
     return ok(res, "If the account exists, a reset link has been sent to your email.");
   } catch (error) {

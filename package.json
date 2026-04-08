@@ -37,7 +37,7 @@
     "mongodb": "^7.1.0",
     "mongoose": "^9.2.3",
     "multer": "^2.1.1",
-    "nodemailer": "^8.0.1",
+    "sib-api-v3-sdk": "^8.5.0",
     "zod": "^4.3.6"
   },
   "devDependencies": {
@@ -48,7 +48,6 @@
     "@types/jsonwebtoken": "^9.0.10",
     "@types/multer": "^2.1.0",
     "@types/node": "^25.2.3",
-    "@types/nodemailer": "^7.0.10",
     "@typescript-eslint/eslint-plugin": "^8.56.1",
     "@typescript-eslint/parser": "^8.56.1",
     "eslint": "^10.0.2",
