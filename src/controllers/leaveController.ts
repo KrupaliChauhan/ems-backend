@@ -7,7 +7,6 @@ import Holiday from "../models/Holiday";
 import LeaveRequest, { type LeaveRequest as LeaveRequestModel } from "../models/LeaveRequest";
 import User from "../models/User";
 import Department from "../models/Department";
-import Project from "../models/Project";
 import {
   buildBalanceSummary,
   calculateLeaveDays,
@@ -26,6 +25,7 @@ import {
   toYmd,
   validateEmployeeAccess
 } from "../services/leaveService";
+import { getTeamMemberIdsByLeader } from "../services/userService";
 import { upsertAppNotifications } from "../services/communicationService";
 import { recordAuditLog } from "../services/auditService";
 import {
@@ -193,18 +193,7 @@ function canTakeLeaveAction(role?: string) {
 }
 
 async function getTeamLeaderScopedEmployeeIds(userId: string) {
-  const projects = await Project.find({
-    createdBy: userId,
-    isDeleted: false
-  })
-    .select("employees")
-    .lean();
-
-  return [
-    ...new Set(
-      projects.flatMap((project) => (project.employees || []).map((employeeId) => String(employeeId)))
-    )
-  ];
+  return getTeamMemberIdsByLeader(userId);
 }
 
 async function canTeamLeaderAccessLeaveRequest(
@@ -805,6 +794,14 @@ export const applyLeave = async (req: Request, res: Response) => {
 
     const fromDate = startOfDay(parsed.data.fromDate);
     const toDate = startOfDay(parsed.data.toDate);
+
+    if (parsed.data.dayUnit === "HALF" && fromDate.getTime() !== toDate.getTime()) {
+      await safelyDeleteUploadedFile(file);
+      return res.status(400).json({
+        success: false,
+        message: "Half-day leave can only be applied for a single day"
+      });
+    }
 
     if (!leaveType.allowPastDates && fromDate < startOfDay(new Date())) {
       await safelyDeleteUploadedFile(file);

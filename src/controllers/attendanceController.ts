@@ -5,6 +5,7 @@ import Department from "../models/Department";
 import Project from "../models/Project";
 import {
   addAttendancePunch,
+  AttendanceServiceError,
   ensureAttendancePolicy,
   getAttendanceDashboardSummary,
   getAttendanceDay,
@@ -16,6 +17,7 @@ import {
   recomputeAttendanceRange
 } from "../services/attendanceService";
 import { startOfDay, toYmd } from "../services/leaveService";
+import { getTeamMemberIdsByLeader } from "../services/userService";
 import { buildHolidayPayload, validateHolidayDepartment } from "../services/holidayService";
 import {
   attendanceDailyQuerySchema,
@@ -55,17 +57,16 @@ function isAdminOrSuperAdmin(role?: string) {
   return hasAnyRole(role, ATTENDANCE_MANAGER_ROLES);
 }
 
-async function getTeamLeaderScopedEmployeeIds(userId: string) {
-  const projects = await Project.find({
-    createdBy: userId,
-    isDeleted: false
-  })
-    .select("employees")
-    .lean();
+function resolveAttendanceErrorStatus(error: unknown, fallbackStatus = 400) {
+  if (error instanceof AttendanceServiceError) {
+    return error.statusCode;
+  }
 
-  return [
-    ...new Set(projects.flatMap((project) => (project.employees || []).map((id) => String(id))))
-  ];
+  return fallbackStatus;
+}
+
+async function getTeamLeaderScopedEmployeeIds(userId: string) {
+  return getTeamMemberIdsByLeader(userId);
 }
 
 function buildPolicyPayload(doc: Awaited<ReturnType<typeof ensureAttendancePolicy>>) {
@@ -194,7 +195,7 @@ export const createAttendancePunch = async (req: Request, res: Response) => {
       }
     });
   } catch (error) {
-    return res.status(400).json({
+    return res.status(resolveAttendanceErrorStatus(error)).json({
       success: false,
       message: error instanceof Error ? error.message : "Failed to add attendance punch"
     });
@@ -352,14 +353,31 @@ export const recomputeAttendanceByRange = async (req: Request, res: Response) =>
       });
     }
 
-    const data = await recomputeAttendanceRange(parsed.data);
+    const authUser = getAuthUser(req);
+    if (!authUser) {
+      return res.status(401).json({ success: false, message: "Not authorized" });
+    }
+
+    const isLeaderView = authUser.role === "teamLeader";
+    const scopedEmployeeIds = isLeaderView
+      ? await getTeamLeaderScopedEmployeeIds(authUser.id)
+      : undefined;
+
+    if (isLeaderView && parsed.data.employeeId && !scopedEmployeeIds?.includes(parsed.data.employeeId)) {
+      return res.status(403).json({ success: false, message: "Access denied" });
+    }
+
+    const data = await recomputeAttendanceRange({
+      ...parsed.data,
+      employeeIds: isLeaderView ? scopedEmployeeIds : undefined
+    });
     return res.status(200).json({
       success: true,
       message: "Attendance recomputed successfully",
       data
     });
   } catch (error) {
-    return res.status(400).json({
+    return res.status(resolveAttendanceErrorStatus(error)).json({
       success: false,
       message: error instanceof Error ? error.message : "Failed to recompute attendance"
     });
@@ -377,6 +395,19 @@ export const recomputeAttendanceByEmployeeDate = async (req: Request, res: Respo
       });
     }
 
+    const authUser = getAuthUser(req);
+    if (!authUser) {
+      return res.status(401).json({ success: false, message: "Not authorized" });
+    }
+
+    const isLeaderView = authUser.role === "teamLeader";
+    if (isLeaderView) {
+      const scopedEmployeeIds = await getTeamLeaderScopedEmployeeIds(authUser.id);
+      if (!scopedEmployeeIds.includes(parsed.data.employeeId)) {
+        return res.status(403).json({ success: false, message: "Access denied" });
+      }
+    }
+
     const data = await recomputeAttendanceForEmployeeDate(parsed.data.employeeId, parsed.data.date);
     return res.status(200).json({
       success: true,
@@ -384,7 +415,7 @@ export const recomputeAttendanceByEmployeeDate = async (req: Request, res: Respo
       data
     });
   } catch (error) {
-    return res.status(400).json({
+    return res.status(resolveAttendanceErrorStatus(error)).json({
       success: false,
       message: error instanceof Error ? error.message : "Failed to recompute attendance day"
     });
@@ -419,6 +450,7 @@ export const getAttendanceEmployees = async (req: Request, res: Response) => {
           id: item._id,
           name: item.name,
           email: item.email,
+          joiningDate: item.joiningDate ?? null,
           department:
             typeof item.department === "object" && item.department !== null && "name" in item.department
               ? String(item.department.name ?? "")

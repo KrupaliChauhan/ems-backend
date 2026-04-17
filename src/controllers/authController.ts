@@ -8,6 +8,7 @@ import { env } from "../config/env";
 import { recordAuditLog } from "../services/auditService";
 import { sendEmail } from "../services/mailService";
 import { logServerError } from "../utils/serverLogger";
+import { normalizeUserStatus } from "../services/userService";
 
 export const login = async (req: Request, res: Response) => {
   try {
@@ -16,7 +17,9 @@ export const login = async (req: Request, res: Response) => {
 
     if (!user) return badRequest(res, "Invalid credentials");
     if (user.isDeleted) return forbidden(res, "Account deleted");
-    if (user.status === "Inactive") return forbidden(res, "Account inactive");
+    if (normalizeUserStatus(user.isActive ?? user.status !== "Inactive") === "Inactive") {
+      return forbidden(res, "Account inactive");
+    }
 
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) return badRequest(res, "Invalid credentials");
@@ -41,7 +44,9 @@ export const login = async (req: Request, res: Response) => {
         id: String(user._id),
         name: user.name,
         email: user.email,
-        role: user.role
+        role: user.role,
+        joiningDate: user.joiningDate ?? null,
+        teamLeaderId: user.teamLeaderId ? String(user.teamLeaderId) : null
       }
     });
   } catch (error) {
@@ -56,7 +61,9 @@ export const forgotPassword = async (req: Request, res: Response) => {
 
     const user = await User.findOne({ email });
 
-    if (!user || user.isDeleted || user.status === "Inactive") {
+    const isInactive = user ? normalizeUserStatus(user.isActive ?? user.status !== "Inactive") === "Inactive" : false;
+
+    if (!user || user.isDeleted || isInactive) {
       return ok(res, "If the account exists, a reset link has been sent to your email.");
     }
 

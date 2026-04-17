@@ -9,6 +9,9 @@ export interface IUser extends Document {
   role: AppRole;
   department: mongoose.Types.ObjectId | null;
   designation: mongoose.Types.ObjectId | null;
+  joiningDate: Date;
+  teamLeaderId: mongoose.Types.ObjectId | null;
+  isActive: boolean;
   status: "Active" | "Inactive";
   isDeleted: boolean;
 
@@ -44,6 +47,20 @@ const UserSchema = new Schema<IUser>(
       ref: "Designation",
       required: false
     },
+    joiningDate: {
+      type: Date,
+      required: true,
+      default: Date.now
+    },
+    teamLeaderId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null
+    },
+    isActive: {
+      type: Boolean,
+      default: true
+    },
 
     status: {
       type: String,
@@ -66,5 +83,6 @@ UserSchema.index({ email: 1 }, { unique: true, partialFilterExpression: { isDele
 
 UserSchema.index({ username: 1 }, { unique: true, partialFilterExpression: { isDeleted: false } });
 UserSchema.index({ isDeleted: 1, role: 1, status: 1, createdAt: -1 });
+UserSchema.index({ teamLeaderId: 1, isDeleted: 1, isActive: 1 });
 
 export default mongoose.model<IUser>("User", UserSchema);

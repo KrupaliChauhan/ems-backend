@@ -17,11 +17,11 @@ import { logServerError } from "../utils/serverLogger";
 import { getRequestAuthUser } from "../utils/requestContext";
 import {
   TASK_STATUS_FLOW,
-  canManageAllProjects,
   ensureEmployeeEligible,
   ensureProjectExists,
   ensureTaskExists,
   hasProjectManagerAccess,
+  isManagedByTeamLeader,
   isProjectMember
 } from "../services/taskService";
 import { syncProjectStatusById } from "../services/projectService";
@@ -35,7 +35,7 @@ function canManageProjectTasks(role?: string) {
 }
 
 function canUpdateOwnTaskProgress(role?: string) {
-  return role === "employee" || role === "teamLeader";
+  return role === "employee";
 }
 
 function isValidObjectId(id: string) {
@@ -54,7 +54,9 @@ async function getTaskAccessContext(taskId: string, authUserId: string, authRole
   }
 
   const canAccess = canManageProjectTasks(authRole)
-    ? hasProjectManagerAccess(project, authUserId, authRole)
+    ? authRole === "teamLeader"
+      ? await isManagedByTeamLeader(String(task.assignedTo), authUserId)
+      : hasProjectManagerAccess(project, authUserId, authRole)
     : String(task.assignedTo) === String(authUserId);
 
   return { task, project, canAccess };
@@ -123,6 +125,7 @@ export const createTask = async (req: Request, res: Response) => {
       description: parsed.data.description ?? "",
       dueDate: parsed.data.dueDate ?? null,
       estimatedHours: parsed.data.estimatedHours ?? null,
+      createdBy: parsed.data.assignedTo,
       assignedBy: authUser.id
     });
 
@@ -519,7 +522,10 @@ export const updateTask = async (req: Request, res: Response) => {
 
     const updated = await Task.findOneAndUpdate(
       { _id: parsedParam.data.id, isDeleted: false },
-      { ...parsedBody.data },
+      {
+        ...parsedBody.data,
+        ...(parsedBody.data.assignedTo ? { createdBy: parsedBody.data.assignedTo } : {})
+      },
       { returnDocument: "after" }
     )
       .select("_id projectId title description assignedTo assignedBy status priority dueDate estimatedHours updatedAt")
@@ -603,7 +609,12 @@ export const updateTaskStatus = async (req: Request, res: Response) => {
       if (!project) {
         return notFound(res, "Project not found");
       }
-      if (!hasProjectManagerAccess(project, authUser.id, authUser.role)) {
+      const hasManagerAccess =
+        authUser.role === "teamLeader"
+          ? await isManagedByTeamLeader(String(task.assignedTo), authUser.id)
+          : hasProjectManagerAccess(project, authUser.id, authUser.role);
+
+      if (!hasManagerAccess) {
         return forbidden(res, "Access denied");
       }
     } else {

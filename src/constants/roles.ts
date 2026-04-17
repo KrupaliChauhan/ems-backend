@@ -13,6 +13,7 @@ export const USER_VIEW_ROLES = ["superadmin", "admin", "HR"] as const;
 export const USER_MANAGE_ROLES = ["superadmin", "admin", "HR"] as const;
 export const PROJECT_MANAGER_ROLES = ["superadmin", "admin", "teamLeader"] as const;
 export const ATTENDANCE_MANAGER_ROLES = ["superadmin", "admin", "HR"] as const;
+export const ATTENDANCE_RECOMPUTE_ROLES = ["superadmin", "admin", "HR", "teamLeader"] as const;
 export const SELF_ATTENDANCE_ROLES = ["employee", "teamLeader", "HR"] as const;
 export const LEAVE_SELF_SERVICE_ROLES = ["employee", "teamLeader", "HR"] as const;
 export const LEAVE_TYPE_MANAGER_ROLES = ["superadmin", "admin", "HR"] as const;

@@ -11,18 +11,22 @@ import { created, badRequest, forbidden, notFound, ok, serverError } from "../ut
 import { logServerError } from "../utils/serverLogger";
 import { getRequestAuthUser } from "../utils/requestContext";
 import {
+  buildProjectPersistencePayload,
   deriveProjectStatus,
   ensureProjectEmployeesValid,
   findAccessibleProjectById,
   getManagedProjectFilter,
   getNewProjectMembers,
+  includeProjectCreatorInMembers,
   isEmployeeProjectMember,
   isTeamLeader,
   isValidObjectId,
   isPrivilegedProjectManager,
   normalizeProjectTimeLimitInput,
+  resolveProjectLeaderId,
   syncProjectStatuses,
-  uniqueProjectEmployeeIds
+  uniqueProjectEmployeeIds,
+  serializeProject
 } from "../services/projectService";
 import { notifyProjectMembersAdded } from "../services/communicationService";
 import { recordAuditLog } from "../services/auditService";
@@ -39,11 +43,12 @@ export const createProject = async (req: Request, res: Response) => {
       return forbidden(res, "Access denied");
     }
 
-    const employees = uniqueProjectEmployeeIds(parsed.data.employees);
+    const requestedMembers = uniqueProjectEmployeeIds(parsed.data.members);
+    const members = includeProjectCreatorInMembers(requestedMembers, authUser.id);
     const normalizedTimeLimit = normalizeProjectTimeLimitInput(parsed.data.timeLimit);
-    const employeesValid = await ensureProjectEmployeesValid(employees);
-    if (!employeesValid) {
-      return badRequest(res, "Some selected employees are invalid/inactive/deleted");
+    const membersValid = await ensureProjectEmployeesValid(members);
+    if (!membersValid) {
+      return badRequest(res, "Some selected members are invalid/inactive/deleted");
     }
 
     const initialStatus = deriveProjectStatus({
@@ -54,17 +59,21 @@ export const createProject = async (req: Request, res: Response) => {
     });
 
     const project = await Project.create({
-      ...parsed.data,
-      timeLimit: normalizedTimeLimit,
-      status: initialStatus,
-      employees,
-      createdBy: authUser.id
+      ...buildProjectPersistencePayload({
+        name: parsed.data.name,
+        description: parsed.data.description,
+        timeLimit: normalizedTimeLimit,
+        startDate: parsed.data.startDate,
+        status: initialStatus,
+        memberIds: members,
+        projectLeaderId: authUser.id
+      })
     });
 
     await notifyProjectMembersAdded({
       projectId: String(project._id),
       projectName: project.name,
-      userIds: employees
+      userIds: members
     });
 
     await recordAuditLog({
@@ -74,17 +83,15 @@ export const createProject = async (req: Request, res: Response) => {
       entityType: "project",
       entityId: String(project._id),
       summary: `Created project ${project.name}`,
-      metadata: { employeeCount: employees.length }
+      metadata: { memberCount: members.length }
     });
 
     const responseData = {
-      message: "Project created successfully",
-      projectId: String(project._id)
+      projectId: String(project._id),
+      project: serializeProject(project.toObject())
     };
 
-    return created(res, "Project created successfully", responseData, {
-      projectId: String(project._id)
-    });
+    return created(res, "Project created successfully", responseData);
   } catch (error) {
     logServerError("project.create", error);
     return serverError(res, "Failed to create project");
@@ -116,8 +123,10 @@ export const getProjects = async (req: Request, res: Response) => {
     const [total, projects] = await Promise.all([
       Project.countDocuments(filter),
       Project.find(filter)
-        .select("_id name description timeLimit startDate status employees createdAt createdBy")
+        .select("_id name description timeLimit startDate status members employees createdAt projectLeader createdBy")
+        .populate("members", "name email role")
         .populate("employees", "name email")
+        .populate("projectLeader", "name email role")
         .populate("createdBy", "name email role")
         .sort({ createdAt: -1 })
         .skip(skip)
@@ -126,7 +135,7 @@ export const getProjects = async (req: Request, res: Response) => {
     ]);
 
     return ok(res, "Projects fetched successfully", {
-      items: projects,
+      items: projects.map((project) => serializeProject(project)),
       total,
       page,
       limit,
@@ -158,15 +167,14 @@ export const getProjectById = async (req: Request, res: Response) => {
     }
 
     const canManageAllProjects = isPrivilegedProjectManager(authUser.role);
-    const isOwnerTeamLeader =
-      isTeamLeader(authUser.role) && String(project.createdBy) === String(authUser.id);
+    const isProjectLeader = resolveProjectLeaderId(project) === String(authUser.id);
     const isMember = isEmployeeProjectMember(project, authUser.id);
 
-    if (!canManageAllProjects && !isOwnerTeamLeader && !isMember) {
+    if (!canManageAllProjects && !isProjectLeader && !isMember) {
       return forbidden(res, "Access denied");
     }
 
-    return ok(res, "Project fetched successfully", project);
+    return ok(res, "Project fetched successfully", serializeProject(project));
   } catch (error) {
     logServerError("project.getById", error);
     return serverError(res, "Failed to fetch project");
@@ -190,21 +198,27 @@ export const updateProject = async (req: Request, res: Response) => {
       return forbidden(res, "Access denied");
     }
 
-    const employees = uniqueProjectEmployeeIds(parsedBody.data.employees);
+    const requestedMembers = uniqueProjectEmployeeIds(parsedBody.data.members);
     const normalizedTimeLimit = normalizeProjectTimeLimitInput(parsedBody.data.timeLimit);
-    const employeesValid = await ensureProjectEmployeesValid(employees);
-    if (!employeesValid) {
-      return badRequest(res, "Some Selected employees are invalid/inactive/deleted");
-    }
-
     const filter: Record<string, unknown> = { _id: parsedParam.data.id, isDeleted: false };
     if (isTeamLeader(authUser.role) && !isPrivilegedProjectManager(authUser.role)) {
-      filter.createdBy = authUser.id;
+      filter.$or = [{ projectLeader: authUser.id }, { createdBy: authUser.id }];
     }
 
-    const existing = await Project.findOne(filter).select("name employees").lean();
+    const existing = await Project.findOne(filter)
+      .select("name members employees projectLeader createdBy")
+      .lean();
     if (!existing) {
       return notFound(res, "Project not found");
+    }
+
+    const members = includeProjectCreatorInMembers(
+      requestedMembers,
+      resolveProjectLeaderId(existing)
+    );
+    const membersValid = await ensureProjectEmployeesValid(members);
+    if (!membersValid) {
+      return badRequest(res, "Some selected members are invalid/inactive/deleted");
     }
     const taskCount = await Task.countDocuments({ projectId: parsedParam.data.id, isDeleted: false });
 
@@ -217,18 +231,31 @@ export const updateProject = async (req: Request, res: Response) => {
 
     const updated = await Project.findOneAndUpdate(
       filter,
-      { ...parsedBody.data, timeLimit: normalizedTimeLimit, status: nextStatus, employees },
+      {
+        ...buildProjectPersistencePayload({
+          name: parsedBody.data.name,
+          description: parsedBody.data.description,
+          timeLimit: normalizedTimeLimit,
+          startDate: parsedBody.data.startDate,
+          status: nextStatus,
+          memberIds: members,
+          projectLeaderId: resolveProjectLeaderId(existing)
+        })
+      },
       { returnDocument: "after" }
     )
-      .select("name description timeLimit startDate status employees updatedAt")
+      .select("name description timeLimit startDate status members employees updatedAt projectLeader createdBy")
+      .populate("members", "name email role")
       .populate("employees", "name email role")
+      .populate("projectLeader", "name email role")
+      .populate("createdBy", "name email role")
       .lean();
 
     if (!updated) {
       return notFound(res, "Project not found");
     }
 
-    const newMembers = getNewProjectMembers(existing.employees || [], employees);
+    const newMembers = getNewProjectMembers(existing.members || existing.employees || [], members);
     await notifyProjectMembersAdded({
       projectId: parsedParam.data.id,
       projectName: updated.name,
@@ -246,13 +273,11 @@ export const updateProject = async (req: Request, res: Response) => {
     });
 
     const responseData = {
-      message: "Project updated successfully",
-      project: updated
+      projectId: parsedParam.data.id,
+      project: serializeProject(updated)
     };
 
-    return ok(res, "Project updated successfully", responseData, {
-      project: updated
-    });
+    return ok(res, "Project updated successfully", responseData);
   } catch (error) {
     logServerError("project.update", error);
     return serverError(res, "Failed to update project");
@@ -273,7 +298,7 @@ export const softDeleteProject = async (req: Request, res: Response) => {
 
     const filter: Record<string, unknown> = { _id: parsedParam.data.id, isDeleted: false };
     if (isTeamLeader(authUser.role) && !isPrivilegedProjectManager(authUser.role)) {
-      filter.createdBy = authUser.id;
+      filter.$or = [{ projectLeader: authUser.id }, { createdBy: authUser.id }];
     }
 
     const deleted = await Project.findOneAndUpdate(
@@ -323,7 +348,12 @@ export const getMyProjects = async (req: Request, res: Response) => {
 
     const filter: Record<string, unknown> = {
       isDeleted: false,
-      employees: authUser.id
+      $or: [
+        { projectLeader: authUser.id },
+        { members: authUser.id },
+        { employees: authUser.id },
+        { createdBy: authUser.id }
+      ]
     };
     if (search) {
       filter.name = { $regex: search, $options: "i" };
@@ -334,12 +364,16 @@ export const getMyProjects = async (req: Request, res: Response) => {
 
     const projects = await Project.find(filter)
       .sort({ createdAt: -1 })
-      .select("name description timeLimit startDate status employees createdBy")
+      .select("name description timeLimit startDate status members employees projectLeader createdBy")
+      .populate("members", "name email role")
       .populate("employees", "name email role")
+      .populate("projectLeader", "name email role")
       .populate("createdBy", "name email role")
       .lean();
 
-    return ok(res, "My projects fetched successfully", { items: projects });
+    return ok(res, "My projects fetched successfully", {
+      items: projects.map((project) => serializeProject(project))
+    });
   } catch (error) {
     logServerError("project.myProjects", error);
     return serverError(res, "Failed to fetch my projects");

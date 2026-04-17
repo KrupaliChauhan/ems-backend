@@ -17,6 +17,8 @@ export const createUserSchema = z.object({
   name: z.string().trim().min(2).max(80),
   email: z.string().trim().email(),
   role: z.enum(APP_ROLES),
+  joiningDate: z.coerce.date(),
+  teamLeaderId: optionalObjectId,
   departmentId: optionalObjectId,
   designationId: optionalObjectId
 }).superRefine((data, ctx) => {
@@ -40,6 +42,17 @@ export const createUserSchema = z.object({
     });
   }
 });
-export const updateUserStatusSchema = z.object({
-  status: z.enum(["Active", "Inactive"])
+
+export const updateUserSchema = createUserSchema.extend({
+  status: z.enum(["Active", "Inactive"]).optional(),
+  isActive: z.coerce.boolean().optional()
 });
+
+export const updateUserStatusSchema = z
+  .object({
+    status: z.enum(["Active", "Inactive"]).optional(),
+    isActive: z.coerce.boolean().optional()
+  })
+  .refine((value) => value.status !== undefined || value.isActive !== undefined, {
+    message: "Either status or isActive is required"
+  });

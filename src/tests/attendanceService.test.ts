@@ -1,10 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  AttendanceServiceError,
   buildDefaultAttendancePolicy,
   computePunchMetrics,
   resolveAttendanceDayUiStatus,
-  resolveAttendanceStatus
+  resolveAttendanceStatus,
+  validatePunchSequence
 } from "../services/attendanceService";
 
 test("computePunchMetrics calculates worked minutes for valid IN/OUT pairs", () => {
@@ -286,4 +288,52 @@ test("resolveAttendanceDayUiStatus returns WEEK_OFF on weekends", () => {
   });
 
   assert.equal(result.status, "WEEK_OFF");
+});
+
+test("validatePunchSequence blocks punch out before any punch in", () => {
+  assert.throws(
+    () =>
+      validatePunchSequence([], {
+        punchTime: new Date("2026-03-26T09:30:00"),
+        punchType: "OUT"
+      }),
+    (error) => {
+      assert.ok(error instanceof AttendanceServiceError);
+      assert.equal(error.statusCode, 409);
+      assert.equal(error.message, "Punch out cannot be recorded before punch in");
+      return true;
+    }
+  );
+});
+
+test("validatePunchSequence blocks duplicate consecutive punch types", () => {
+  assert.throws(
+    () =>
+      validatePunchSequence(
+        [{ punchTime: new Date("2026-03-26T09:30:00"), punchType: "IN" }],
+        { punchTime: new Date("2026-03-26T09:31:00"), punchType: "IN" }
+      ),
+    (error) => {
+      assert.ok(error instanceof AttendanceServiceError);
+      assert.equal(error.statusCode, 409);
+      assert.equal(error.message, "Punch in cannot be recorded twice in a row");
+      return true;
+    }
+  );
+});
+
+test("validatePunchSequence blocks punches older than the latest recorded punch", () => {
+  assert.throws(
+    () =>
+      validatePunchSequence(
+        [{ punchTime: new Date("2026-03-26T10:00:00"), punchType: "IN" }],
+        { punchTime: new Date("2026-03-26T09:59:00"), punchType: "OUT" }
+      ),
+    (error) => {
+      assert.ok(error instanceof AttendanceServiceError);
+      assert.equal(error.statusCode, 409);
+      assert.equal(error.message, "Punch time cannot be earlier than the latest recorded punch");
+      return true;
+    }
+  );
 });

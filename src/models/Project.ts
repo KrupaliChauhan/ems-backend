@@ -6,6 +6,8 @@ export interface IProject extends Document {
   timeLimit: string;
   startDate: Date;
   status: "active" | "pending" | "completed";
+  projectLeader: mongoose.Types.ObjectId;
+  members: mongoose.Types.ObjectId[];
   employees: mongoose.Types.ObjectId[];
 
   isDeleted: boolean;
@@ -29,7 +31,20 @@ const ProjectSchema = new Schema<IProject>(
       default: "pending",
       required: true
     },
-
+    projectLeader: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+      immutable: true
+    },
+    members: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "User",
+        required: true
+      }
+    ],
+    // Legacy field kept in sync to avoid breaking older consumers while projectLeader/members roll out.
     employees: [
       {
         type: mongoose.Schema.Types.ObjectId,
@@ -40,13 +55,20 @@ const ProjectSchema = new Schema<IProject>(
     isDeleted: { type: Boolean, default: false, index: true },
     deletedAt: { type: Date, default: null },
     deletedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
-
-    createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true }
+    // Legacy field kept in sync to avoid breaking older consumers while projectLeader/members roll out.
+    createdBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+      immutable: true
+    }
   },
   { timestamps: true }
 );
 
 ProjectSchema.index({ isDeleted: 1, createdAt: -1 });
+ProjectSchema.index({ projectLeader: 1, isDeleted: 1 });
+ProjectSchema.index({ members: 1, isDeleted: 1 });
 ProjectSchema.index({ employees: 1, isDeleted: 1 });
 
 export default mongoose.model<IProject>("Project", ProjectSchema);

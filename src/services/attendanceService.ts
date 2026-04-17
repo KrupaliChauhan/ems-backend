@@ -1,3 +1,4 @@
+import mongoose from "mongoose";
 import AttendancePolicy, {
   ATTENDANCE_WEEKDAY_VALUES,
   type AttendancePolicyDocument
@@ -11,6 +12,7 @@ import { endOfDay, startOfDay, toYmd } from "./leaveService";
 import { SELF_ATTENDANCE_ROLES, hasAnyRole } from "../constants/roles";
 import { getApplicableHolidayByDate, getApplicableHolidays } from "./holidayService";
 import { DEFAULT_WEEKLY_OFFS } from "../constants/calendar";
+import { buildActiveUserFilter } from "./userService";
 
 type PolicySnapshot = {
   officeStartTime: string;
@@ -58,6 +60,14 @@ type MonthlyHolidayRecord = {
   name?: string;
 };
 
+type AttendanceEmployeeRecord = {
+  _id: mongoose.Types.ObjectId;
+  department?: mongoose.Types.ObjectId | null;
+  joiningDate?: Date | null;
+  status?: string;
+  isActive?: boolean;
+};
+
 export type AttendanceDayUiStatus =
   | "HOLIDAY"
   | "LEAVE"
@@ -76,6 +86,15 @@ type AttendanceDayUiEvaluation = {
   lateThresholdTime: Date;
   halfDayTime: Date;
 };
+
+export class AttendanceServiceError extends Error {
+  statusCode: number;
+
+  constructor(statusCode: number, message: string) {
+    super(message);
+    this.statusCode = statusCode;
+  }
+}
 
 export function buildDefaultAttendancePolicy(): PolicySnapshot {
   return {
@@ -173,6 +192,33 @@ function getMonthRange(year: number, month: number) {
     fromDate,
     toDate: monthEnd > todayEnd ? todayEnd : monthEnd
   };
+}
+
+function resolveJoiningDate(joiningDate?: Date | null) {
+  return joiningDate ? startOfDay(joiningDate) : null;
+}
+
+function isBeforeJoiningDate(date: Date, joiningDate?: Date | null) {
+  const normalizedJoiningDate = resolveJoiningDate(joiningDate);
+  if (!normalizedJoiningDate) {
+    return false;
+  }
+
+  return startOfDay(date).getTime() < normalizedJoiningDate.getTime();
+}
+
+function isFutureAttendanceDate(date: Date) {
+  return startOfDay(date).getTime() > startOfDay(new Date()).getTime();
+}
+
+async function getAttendanceEmployee(employeeId: string) {
+  return User.findOne({
+    _id: employeeId,
+    role: { $in: SELF_ATTENDANCE_ROLES },
+    isDeleted: false
+  })
+    .select("_id department joiningDate status isActive")
+    .lean<AttendanceEmployeeRecord | null>();
 }
 
 async function resolveApprovedLeave(employeeId: string, date: Date): Promise<LeaveResolution> {
@@ -499,7 +545,31 @@ export async function recomputeAttendanceForEmployeeDate(employeeId: string, inp
   const policy = getPolicySnapshot(await ensureAttendancePolicy());
   const date = startOfDay(inputDate);
   const dateKey = toYmd(date);
-  const employee = await User.findById(employeeId).select("department").lean();
+  const employee = await getAttendanceEmployee(employeeId);
+
+  if (!employee) {
+    throw new AttendanceServiceError(404, "Employee not found");
+  }
+
+  if (isFutureAttendanceDate(date)) {
+    await AttendanceDailySummary.deleteOne({ employeeId, dateKey });
+    return {
+      employeeId,
+      dateKey,
+      skipped: true,
+      reason: "future_date"
+    };
+  }
+
+  if (isBeforeJoiningDate(date, employee.joiningDate)) {
+    await AttendanceDailySummary.deleteOne({ employeeId, dateKey });
+    return {
+      employeeId,
+      dateKey,
+      skipped: true,
+      joiningDate: employee.joiningDate ?? null
+    };
+  }
 
   const punches = await AttendancePunch.find({
     employeeId,
@@ -537,6 +607,7 @@ export async function recomputeAttendanceForEmployeeDate(employeeId: string, inp
 
 export async function recomputeAttendanceRange(params: {
   employeeId?: string;
+  employeeIds?: string[];
   fromDate: Date;
   toDate: Date;
 }) {
@@ -550,18 +621,34 @@ export async function recomputeAttendanceRange(params: {
   }
 
   const employees = params.employeeId
-    ? [{ _id: params.employeeId }]
-    : await User.find({
+    ? await User.find({
+        _id: params.employeeId,
         role: { $in: SELF_ATTENDANCE_ROLES },
-        status: "Active",
         isDeleted: false
       })
-        .select("_id")
+        .select("_id joiningDate")
+        .lean()
+    : params.employeeIds
+      ? await User.find({
+          _id: { $in: params.employeeIds.length > 0 ? params.employeeIds : [new mongoose.Types.ObjectId()] },
+          role: { $in: SELF_ATTENDANCE_ROLES },
+          isDeleted: false,
+          ...buildActiveUserFilter(true)
+        })
+          .select("_id joiningDate")
+          .lean()
+    : await User.find({
+        role: { $in: SELF_ATTENDANCE_ROLES },
+        isDeleted: false,
+        ...buildActiveUserFilter(true)
+      })
+        .select("_id joiningDate")
         .lean();
 
   let processed = 0;
   for (const employee of employees) {
-    const current = new Date(fromDate);
+    const effectiveFromDate = resolveJoiningDate((employee as { joiningDate?: Date | null }).joiningDate);
+    const current = effectiveFromDate && effectiveFromDate > fromDate ? new Date(effectiveFromDate) : new Date(fromDate);
     while (current <= toDate) {
       await recomputeAttendanceForEmployeeDate(String(employee._id), current);
       processed += 1;
@@ -591,19 +678,32 @@ export async function addAttendancePunch(params: {
       isSelfPunch && hasAnyRole(params.actorRole, SELF_ATTENDANCE_ROLES)
         ? { $in: SELF_ATTENDANCE_ROLES }
         : { $in: SELF_ATTENDANCE_ROLES },
-    status: "Active",
-    isDeleted: false
+    isDeleted: false,
+    ...buildActiveUserFilter(true)
   })
-    .select("_id")
+    .select("_id joiningDate")
     .lean();
 
   if (!employee) {
-    throw new Error("Employee not found");
+    throw new AttendanceServiceError(404, "Employee not found");
   }
 
   const policy = getPolicySnapshot(await ensureAttendancePolicy());
   const date = startOfDay(params.punchTime);
   const dateKey = toYmd(date);
+  const now = new Date();
+
+  if (params.punchTime.getTime() > now.getTime()) {
+    throw new AttendanceServiceError(422, "Future attendance punches are not allowed");
+  }
+
+  if (isBeforeJoiningDate(date, employee.joiningDate)) {
+    throw new AttendanceServiceError(
+      422,
+      `Attendance cannot be recorded before the employee's joining date (${toYmd(employee.joiningDate as Date)})`
+    );
+  }
+
   const existingPunches = await AttendancePunch.find({
     employeeId: params.employeeId,
     dateKey
@@ -614,13 +714,18 @@ export async function addAttendancePunch(params: {
   if (policy.enableLeaveIntegration) {
     const leave = await resolveApprovedLeave(params.employeeId, date);
     if (leave.isFullDayLeave) {
-      throw new Error("Punch in and punch out are disabled on approved leave dates");
+      throw new AttendanceServiceError(409, "Punch in and punch out are disabled on approved leave dates");
     }
   }
 
   if (!policy.multiplePunchAllowed && existingPunches.length >= 2) {
-    throw new Error("Multiple punch is disabled in attendance policy");
+    throw new AttendanceServiceError(409, "Multiple punch is disabled in attendance policy");
   }
+
+  validatePunchSequence(existingPunches, {
+    punchType: params.punchType,
+    punchTime: params.punchTime
+  });
 
   const created = await AttendancePunch.create({
     employeeId: params.employeeId,
@@ -641,11 +746,35 @@ export async function addAttendancePunch(params: {
 export async function getAttendanceDay(employeeId: string, inputDate: Date) {
   const date = startOfDay(inputDate);
   const dateKey = toYmd(date);
+  const employee = await getAttendanceEmployee(employeeId);
+
+  if (!employee) {
+    throw new AttendanceServiceError(404, "Employee not found");
+  }
+
+  if (isFutureAttendanceDate(date)) {
+    return {
+      summary: null,
+      punches: [],
+      status: "NOT_STARTED" as AttendanceDayUiStatus,
+      joiningDate: employee.joiningDate ?? null,
+      message: "Attendance is not available for future dates"
+    };
+  }
+
+  if (isBeforeJoiningDate(date, employee.joiningDate)) {
+    return {
+      summary: null,
+      punches: [],
+      status: "NOT_STARTED" as AttendanceDayUiStatus,
+      joiningDate: employee.joiningDate ?? null,
+      message: `Attendance starts from joining date ${toYmd(employee.joiningDate as Date)}`
+    };
+  }
 
   await recomputeAttendanceForEmployeeDate(employeeId, date);
 
   const policy = getPolicySnapshot(await ensureAttendancePolicy());
-  const employee = await User.findById(employeeId).select("department").lean();
   const [summary, punches] = await Promise.all([
     AttendanceDailySummary.findOne({ employeeId, dateKey })
       .populate("holidayId", "name date")
@@ -677,22 +806,60 @@ export async function getAttendanceDay(employeeId: string, inputDate: Date) {
   return {
     summary,
     punches,
-    status: uiStatus.status
+    status: uiStatus.status,
+    joiningDate: employee.joiningDate ?? null
   };
 }
 
+export function validatePunchSequence(
+  punches: Array<Pick<AttendancePunchLike, "punchType" | "punchTime">>,
+  nextPunch: Pick<AttendancePunchLike, "punchType" | "punchTime">
+) {
+  const sortedPunches = [...punches].sort(
+    (left, right) => left.punchTime.getTime() - right.punchTime.getTime()
+  );
+  const latestPunch = sortedPunches[sortedPunches.length - 1];
+
+  if (!latestPunch) {
+    if (nextPunch.punchType === "OUT") {
+      throw new AttendanceServiceError(409, "Punch out cannot be recorded before punch in");
+    }
+
+    return;
+  }
+
+  if (nextPunch.punchTime.getTime() < latestPunch.punchTime.getTime()) {
+    throw new AttendanceServiceError(409, "Punch time cannot be earlier than the latest recorded punch");
+  }
+
+  if (latestPunch.punchType === nextPunch.punchType) {
+    throw new AttendanceServiceError(
+      409,
+      nextPunch.punchType === "IN"
+        ? "Punch in cannot be recorded twice in a row"
+        : "Punch out cannot be recorded twice in a row"
+    );
+  }
+}
+
 export async function getAttendanceMonth(employeeId: string, month: number, year: number) {
+  const employee = await getAttendanceEmployee(employeeId);
+  if (!employee) {
+    throw new Error("Employee not found");
+  }
+
   const { fromDate, toDate } = getMonthRange(year, month);
-  if (fromDate > toDate) {
+  const joiningDate = resolveJoiningDate(employee.joiningDate);
+  const effectiveFromDate = joiningDate && joiningDate > fromDate ? joiningDate : fromDate;
+  if (effectiveFromDate > toDate) {
     return { items: [], summary: {} };
   }
 
   const policy = getPolicySnapshot(await ensureAttendancePolicy());
-  const employee = await User.findById(employeeId).select("department").lean();
   const [punches, leaves, holidays] = await Promise.all([
     AttendancePunch.find({
       employeeId,
-      date: { $gte: fromDate, $lte: toDate }
+      date: { $gte: effectiveFromDate, $lte: toDate }
     })
       .select("dateKey punchTime punchType")
       .sort({ punchTime: 1 })
@@ -702,7 +869,7 @@ export async function getAttendanceMonth(employeeId: string, month: number, year
           employeeId,
           status: "Approved",
           fromDate: { $lte: endOfDay(toDate) },
-          toDate: { $gte: startOfDay(fromDate) }
+          toDate: { $gte: startOfDay(effectiveFromDate) }
         })
           .select("_id fromDate toDate dayUnit")
           .sort({ createdAt: -1 })
@@ -734,7 +901,7 @@ export async function getAttendanceMonth(employeeId: string, month: number, year
 
   const operations: any[] = [];
 
-  const current = new Date(fromDate);
+  const current = new Date(effectiveFromDate);
   while (current <= toDate) {
     const date = new Date(current);
     const dateKey = toYmd(date);
@@ -770,7 +937,7 @@ export async function getAttendanceMonth(employeeId: string, month: number, year
     employeeId,
     month,
     year,
-    date: { $gte: fromDate, $lte: toDate }
+    date: { $gte: effectiveFromDate, $lte: toDate }
   })
     .sort({ date: 1 })
     .lean();
@@ -861,7 +1028,7 @@ export async function listAttendance(params: {
     AttendanceDailySummary.find(filter)
       .populate({
         path: "employeeId",
-        select: "name email department designation",
+        select: "name email department designation joiningDate",
         populate: [
           { path: "department", select: "name" },
           { path: "designation", select: "name" }
@@ -875,12 +1042,25 @@ export async function listAttendance(params: {
     AttendanceDailySummary.countDocuments(filter)
   ]);
 
+  const filteredItems = items.filter((item) => {
+    const employee =
+      typeof item.employeeId === "object" && item.employeeId !== null ? item.employeeId : null;
+    const joiningDate =
+      employee && "joiningDate" in employee ? (employee.joiningDate as Date | string | null | undefined) : null;
+
+    if (!joiningDate) {
+      return true;
+    }
+
+    return startOfDay(item.date).getTime() >= startOfDay(new Date(joiningDate)).getTime();
+  });
+
   return {
-    items,
-    total,
+    items: filteredItems,
+    total: filteredItems.length < items.length ? filteredItems.length : total,
     page: params.page,
     limit: params.limit,
-    totalPages: Math.ceil(total / params.limit) || 1
+    totalPages: Math.ceil((filteredItems.length < items.length ? filteredItems.length : total) / params.limit) || 1
   };
 }
 
@@ -987,10 +1167,10 @@ export async function getAttendanceDashboardSummary(params: {
 export async function listAttendanceEmployees() {
   return User.find({
     role: { $in: SELF_ATTENDANCE_ROLES },
-    status: "Active",
-    isDeleted: false
+    isDeleted: false,
+    ...buildActiveUserFilter(true)
   })
-    .select("_id name email department designation")
+    .select("_id name email department designation joiningDate")
     .populate("department", "name")
     .populate("designation", "name")
     .sort({ name: 1 })

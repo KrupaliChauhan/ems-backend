@@ -67,12 +67,44 @@ export const attendanceListQuerySchema = z.object({
   toDate: z.string().trim().optional().default(""),
   page: z.coerce.number().int().min(1).default(1),
   limit: z.coerce.number().int().min(1).max(100).default(10)
+}).superRefine((value, ctx) => {
+  if (value.fromDate && Number.isNaN(new Date(value.fromDate).getTime())) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["fromDate"],
+      message: "Invalid from date"
+    });
+  }
+
+  if (value.toDate && Number.isNaN(new Date(value.toDate).getTime())) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["toDate"],
+      message: "Invalid to date"
+    });
+  }
+
+  if (value.fromDate && value.toDate && new Date(value.fromDate) > new Date(value.toDate)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["toDate"],
+      message: "To date cannot be earlier than from date"
+    });
+  }
 });
 
 export const attendanceRangeRecomputeSchema = z.object({
   employeeId: objectId.optional(),
   fromDate: z.coerce.date(),
   toDate: z.coerce.date()
+}).superRefine((value, ctx) => {
+  if (value.fromDate > value.toDate) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["toDate"],
+      message: "To date cannot be earlier than from date"
+    });
+  }
 });
 
 export const attendanceSingleRecomputeSchema = z.object({

@@ -16,7 +16,7 @@ import {
   upsertAttendancePolicy
 } from "../controllers/attendanceController";
 import { protect, requireRoles } from "../middleware/authMiddleware";
-import { ATTENDANCE_MANAGER_ROLES } from "../constants/roles";
+import { ATTENDANCE_MANAGER_ROLES, ATTENDANCE_RECOMPUTE_ROLES } from "../constants/roles";
 
 const router = express.Router();
 
@@ -37,13 +37,13 @@ router.get("/dashboard/summary", protect, getAttendanceDashboard);
 router.post(
   "/recompute/range",
   protect,
-  requireRoles(...ATTENDANCE_MANAGER_ROLES),
+  requireRoles(...ATTENDANCE_RECOMPUTE_ROLES),
   recomputeAttendanceByRange
 );
 router.post(
   "/recompute/day",
   protect,
-  requireRoles(...ATTENDANCE_MANAGER_ROLES),
+  requireRoles(...ATTENDANCE_RECOMPUTE_ROLES),
   recomputeAttendanceByEmployeeDate
 );
 

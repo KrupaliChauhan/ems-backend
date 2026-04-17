@@ -17,9 +17,12 @@ type UserMutationInput = {
   name: string;
   email: string;
   role: AppRole;
+  joiningDate: Date;
+  teamLeaderId?: string | null;
   departmentId?: string | null;
   designationId?: string | null;
   status?: UserStatus;
+  isActive?: boolean;
 };
 
 type ListUsersInput = {
@@ -34,7 +37,11 @@ type UserListItem = {
   name: string;
   email: string;
   role: AppRole;
+  isActive: boolean;
   status: UserStatus;
+  joiningDate: Date;
+  teamLeaderId: mongoose.Types.ObjectId | null;
+  teamLeaderName: string;
   department: string;
   designation: string;
 };
@@ -71,6 +78,34 @@ function isDuplicateKeyError(error: unknown) {
     "code" in error &&
     (error as { code?: unknown }).code === 11000
   );
+}
+
+export function normalizeUserStatus(isActive: boolean): UserStatus {
+  return isActive ? "Active" : "Inactive";
+}
+
+export function buildActiveUserFilter(isActive = true) {
+  if (isActive) {
+    return {
+      $or: [{ isActive: true }, { isActive: { $exists: false }, status: "Active" }]
+    };
+  }
+
+  return {
+    $or: [{ isActive: false }, { isActive: { $exists: false }, status: "Inactive" }]
+  };
+}
+
+export async function getTeamMemberIdsByLeader(teamLeaderId: string) {
+  const teamMembers = await User.find({
+    teamLeaderId,
+    role: "employee",
+    isDeleted: false
+  })
+    .select("_id")
+    .lean();
+
+  return teamMembers.map((member) => String(member._id));
 }
 
 async function resolveUserRelations(role: AppRole, departmentId?: string | null, designationId?: string | null) {
@@ -111,6 +146,31 @@ async function resolveUserRelations(role: AppRole, departmentId?: string | null,
   };
 }
 
+async function resolveTeamLeader(teamLeaderId?: string | null) {
+  if (!teamLeaderId) {
+    return null;
+  }
+
+  if (!mongoose.Types.ObjectId.isValid(teamLeaderId)) {
+    throw new UserServiceError(400, "Invalid team leader");
+  }
+
+  const teamLeader = await User.findOne({
+    _id: teamLeaderId,
+    role: "teamLeader",
+    isDeleted: false,
+    ...buildActiveUserFilter(true)
+  })
+    .select("_id")
+    .lean();
+
+  if (!teamLeader) {
+    throw new UserServiceError(400, "Selected team leader is invalid or inactive");
+  }
+
+  return new mongoose.Types.ObjectId(teamLeaderId);
+}
+
 function sendAccountCreationEmail(email: string, rawPassword: string) {
   void sendEmail({
     to: email,
@@ -128,19 +188,22 @@ function sendAccountCreationEmail(email: string, rawPassword: string) {
 }
 
 export async function createUserAccount(input: UserMutationInput) {
-  if (!input.name?.trim() || !input.email?.trim() || !input.role) {
+  if (!input.name?.trim() || !input.email?.trim() || !input.role || !input.joiningDate) {
     throw new UserServiceError(400, "Missing required fields");
   }
 
   const email = normalizeEmail(input.email);
   const name = normalizeName(input.name);
+  const isActive = input.isActive ?? input.status !== "Inactive";
+  const status = normalizeUserStatus(isActive);
 
-  const [existingUser, relations] = await Promise.all([
+  const [existingUser, relations, teamLeader] = await Promise.all([
     User.exists({
       email,
       isDeleted: false
     }),
-    resolveUserRelations(input.role, input.departmentId, input.designationId)
+    resolveUserRelations(input.role, input.departmentId, input.designationId),
+    resolveTeamLeader(input.teamLeaderId)
   ]);
 
   if (existingUser) {
@@ -158,7 +221,11 @@ export async function createUserAccount(input: UserMutationInput) {
       password: hashedPassword,
       role: input.role,
       department: relations.department,
-      designation: relations.designation
+      designation: relations.designation,
+      joiningDate: input.joiningDate,
+      teamLeaderId: input.role === "employee" ? teamLeader : null,
+      isActive,
+      status
     });
 
     sendAccountCreationEmail(email, rawPassword);
@@ -176,44 +243,44 @@ export async function createUserAccount(input: UserMutationInput) {
 }
 
 export async function updateUserAccount(userId: string, input: UserMutationInput) {
-  if (!input.name?.trim() || !input.email?.trim() || !input.role) {
+  if (!input.name?.trim() || !input.email?.trim() || !input.role || !input.joiningDate) {
     throw new UserServiceError(400, "Missing required fields");
+  }
+
+  if (input.teamLeaderId && String(input.teamLeaderId) === String(userId)) {
+    throw new UserServiceError(400, "A user cannot be their own team leader");
   }
 
   const email = normalizeEmail(input.email);
   const name = normalizeName(input.name);
+  const isActive = input.isActive ?? input.status !== "Inactive";
+  const status = normalizeUserStatus(isActive);
 
-  const [existingEmail, relations] = await Promise.all([
+  const [existingEmail, relations, teamLeader] = await Promise.all([
     User.exists({
       email,
       _id: { $ne: userId },
       isDeleted: false
     }),
-    resolveUserRelations(input.role, input.departmentId, input.designationId)
+    resolveUserRelations(input.role, input.departmentId, input.designationId),
+    resolveTeamLeader(input.teamLeaderId)
   ]);
 
   if (existingEmail) {
     throw new UserServiceError(400, "User with this email already exists");
   }
 
-  const updatePayload: {
-    name: string;
-    email: string;
-    role: AppRole;
-    department: mongoose.Types.ObjectId | null;
-    designation: mongoose.Types.ObjectId | null;
-    status?: UserStatus;
-  } = {
+  const updatePayload = {
     name,
     email,
     role: input.role,
+    joiningDate: input.joiningDate,
+    teamLeaderId: input.role === "employee" ? teamLeader : null,
+    isActive,
+    status,
     department: relations.department,
     designation: relations.designation
   };
-
-  if (input.status) {
-    updatePayload.status = input.status;
-  }
 
   const updatedUser = await User.findOneAndUpdate(
     { _id: userId, isDeleted: false },
@@ -240,7 +307,7 @@ export async function listUsers(input: ListUsersInput) {
   };
 
   if (input.status) {
-    filter.status = input.status;
+    filter.$and = [buildActiveUserFilter(input.status === "Active")];
   }
 
   if (input.search) {
@@ -255,6 +322,15 @@ export async function listUsers(input: ListUsersInput) {
       { $sort: { createdAt: -1 } },
       { $skip: skip },
       { $limit: input.limit },
+      {
+        $lookup: {
+          from: "users",
+          localField: "teamLeaderId",
+          foreignField: "_id",
+          as: "teamLeaderDoc",
+          pipeline: [{ $project: { _id: 1, name: 1 } }]
+        }
+      },
       {
         $lookup: {
           from: "departments",
@@ -279,7 +355,20 @@ export async function listUsers(input: ListUsersInput) {
           name: 1,
           email: 1,
           role: 1,
-          status: 1,
+          isActive: { $ifNull: ["$isActive", { $eq: ["$status", "Active"] }] },
+          status: {
+            $ifNull: [
+              "$status",
+              {
+                $cond: [{ $eq: ["$isActive", false] }, "Inactive", "Active"]
+              }
+            ]
+          },
+          joiningDate: 1,
+          teamLeaderId: 1,
+          teamLeaderName: {
+            $ifNull: [{ $arrayElemAt: ["$teamLeaderDoc.name", 0] }, ""]
+          },
           department: {
             $ifNull: [{ $arrayElemAt: ["$departmentDoc.name", 0] }, ""]
           },

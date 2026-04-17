@@ -12,6 +12,26 @@ export function excludeProjectCreatorFromEmployees(ids: string[], creatorId: str
   return ids.filter((id) => String(id) !== String(creatorId));
 }
 
+export function includeProjectCreatorInMembers(ids: string[], creatorId: string) {
+  return uniqueProjectEmployeeIds([...ids, creatorId]);
+}
+
+export function resolveProjectMemberIds(project: {
+  members?: Array<string | { _id?: unknown }> | null;
+  employees?: Array<string | { _id?: unknown }> | null;
+}) {
+  return (project.members || project.employees || []).map((member) =>
+    String((member as { _id?: unknown })._id ?? member)
+  );
+}
+
+export function resolveProjectLeaderId(project: {
+  projectLeader?: unknown;
+  createdBy?: unknown;
+}) {
+  return String(project.projectLeader ?? project.createdBy ?? "");
+}
+
 export function isValidObjectId(id: string) {
   return mongoose.Types.ObjectId.isValid(id);
 }
@@ -32,7 +52,12 @@ export function getManagedProjectFilter(authUser: AuthUser) {
   if (isTeamLeader(authUser.role)) {
     return {
       isDeleted: false,
-      $or: [{ createdBy: authUser.id }, { employees: authUser.id }]
+      $or: [
+        { projectLeader: authUser.id },
+        { members: authUser.id },
+        { employees: authUser.id },
+        { createdBy: authUser.id }
+      ]
     };
   }
 
@@ -59,20 +84,62 @@ export function getNewProjectMembers(
 }
 
 export function isEmployeeProjectMember(
-  project: Pick<IProject, "employees"> | { employees?: Array<{ _id?: unknown } | string> },
+  project: Pick<IProject, "members" | "employees"> | { members?: Array<{ _id?: unknown } | string>; employees?: Array<{ _id?: unknown } | string> },
   userId: string
 ) {
-  return (project.employees || []).some(
-    (member) => String((member as { _id?: unknown })._id ?? member) === String(userId)
-  );
+  return resolveProjectMemberIds(project).some((memberId) => memberId === String(userId));
 }
 
 export async function findAccessibleProjectById(projectId: string) {
   return Project.findOne({ _id: projectId, isDeleted: false })
-    .select("name description timeLimit startDate status employees createdAt updatedAt createdBy")
+    .select("name description timeLimit startDate status members employees createdAt updatedAt projectLeader createdBy")
+    .populate("members", "name email role")
     .populate("employees", "name email role")
+    .populate("projectLeader", "name email role")
     .populate("createdBy", "name email role")
     .lean();
+}
+
+export function buildProjectPersistencePayload(params: {
+  name: string;
+  description: string;
+  timeLimit: string;
+  startDate: Date;
+  status: "active" | "pending" | "completed";
+  memberIds: string[];
+  projectLeaderId: string;
+}) {
+  return {
+    name: params.name,
+    description: params.description,
+    timeLimit: params.timeLimit,
+    startDate: params.startDate,
+    status: params.status,
+    projectLeader: params.projectLeaderId,
+    createdBy: params.projectLeaderId,
+    members: params.memberIds,
+    employees: params.memberIds
+  };
+}
+
+export function serializeProject<T extends {
+  members?: Array<{ _id?: unknown; name?: unknown; email?: unknown; role?: unknown } | string>;
+  employees?: Array<{ _id?: unknown; name?: unknown; email?: unknown; role?: unknown } | string>;
+  projectLeader?: { _id?: unknown; name?: unknown; email?: unknown; role?: unknown } | string | null;
+  createdBy?: { _id?: unknown; name?: unknown; email?: unknown; role?: unknown } | string | null;
+}>(project: T) {
+  const members = Array.isArray(project.members) && project.members.length > 0
+    ? project.members
+    : project.employees || [];
+  const projectLeader = project.projectLeader ?? project.createdBy ?? null;
+
+  return {
+    ...project,
+    members,
+    employees: members,
+    projectLeader,
+    createdBy: projectLeader
+  };
 }
 
 type ParsedProjectTimeLimit = {
