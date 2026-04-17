@@ -4,11 +4,18 @@ import User from "../models/User";
 import type { TaskStatus } from "../models/Task";
 import { buildActiveUserFilter } from "./userService";
 
-export const TASK_STATUS_FLOW: Record<TaskStatus, TaskStatus | null> = {
-  Pending: "In Progress",
-  "In Progress": "In Review",
-  "In Review": "Completed",
-  Completed: null
+export const TASK_MEMBER_STATUS_TRANSITIONS: Record<TaskStatus, TaskStatus[]> = {
+  Pending: ["In Progress"],
+  "In Progress": ["In Review"],
+  "In Review": ["In Progress"],
+  Completed: []
+};
+
+export const TASK_TEAM_LEADER_STATUS_TRANSITIONS: Record<TaskStatus, TaskStatus[]> = {
+  Pending: [],
+  "In Progress": [],
+  "In Review": ["Completed"],
+  Completed: ["In Review"]
 };
 
 export function canManageAllProjects(role?: string) {
@@ -34,8 +41,16 @@ export async function ensureEmployeeEligible(userId: string) {
 
 export async function ensureTaskExists(taskId: string) {
   return Task.findOne({ _id: taskId, isDeleted: false })
-    .select("_id projectId createdBy assignedTo title description")
+    .select("_id projectId createdBy assignedTo status title description")
     .lean();
+}
+
+export function getProjectLeaderId(project: { projectLeader?: unknown; createdBy?: unknown }) {
+  return String(project.projectLeader ?? project.createdBy ?? "");
+}
+
+export function isProjectLeader(project: { projectLeader?: unknown; createdBy?: unknown }, userId: string) {
+  return getProjectLeaderId(project) === String(userId);
 }
 
 export function hasProjectManagerAccess(
@@ -53,7 +68,7 @@ export function hasProjectManagerAccess(
   }
 
   if (role === "teamLeader") {
-    return String(project.projectLeader ?? project.createdBy) === String(userId);
+    return isProjectLeader(project, userId);
   }
 
   return false;

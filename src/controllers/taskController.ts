@@ -16,12 +16,13 @@ import { badRequest, created, forbidden, notFound, ok, serverError } from "../ut
 import { logServerError } from "../utils/serverLogger";
 import { getRequestAuthUser } from "../utils/requestContext";
 import {
-  TASK_STATUS_FLOW,
+  TASK_MEMBER_STATUS_TRANSITIONS,
+  TASK_TEAM_LEADER_STATUS_TRANSITIONS,
   ensureEmployeeEligible,
   ensureProjectExists,
   ensureTaskExists,
   hasProjectManagerAccess,
-  isManagedByTeamLeader,
+  isProjectLeader,
   isProjectMember
 } from "../services/taskService";
 import { syncProjectStatusById } from "../services/projectService";
@@ -29,13 +30,14 @@ import { notifyTaskAssignment } from "../services/communicationService";
 import { recordAuditLog } from "../services/auditService";
 import TaskWorkLog from "../models/TaskWorkLog";
 import { calculateWorkLogMinutes, getTaskWorkLogSummary, getTaskWorkTotals } from "../services/taskWorkLogService";
+import type { TaskAccessRequest } from "../middleware/taskAccessMiddleware";
 
 function canManageProjectTasks(role?: string) {
   return hasAnyRole(role, PROJECT_MANAGER_ROLES);
 }
 
 function canUpdateOwnTaskProgress(role?: string) {
-  return role === "employee";
+  return role === "employee" || role === "teamLeader";
 }
 
 function isValidObjectId(id: string) {
@@ -53,11 +55,7 @@ async function getTaskAccessContext(taskId: string, authUserId: string, authRole
     return { task, project: null, canAccess: false };
   }
 
-  const canAccess = canManageProjectTasks(authRole)
-    ? authRole === "teamLeader"
-      ? await isManagedByTeamLeader(String(task.assignedTo), authUserId)
-      : hasProjectManagerAccess(project, authUserId, authRole)
-    : String(task.assignedTo) === String(authUserId);
+  const canAccess = isProjectLeader(project, authUserId) || String(task.assignedTo) === String(authUserId);
 
   return { task, project, canAccess };
 }
@@ -125,7 +123,7 @@ export const createTask = async (req: Request, res: Response) => {
       description: parsed.data.description ?? "",
       dueDate: parsed.data.dueDate ?? null,
       estimatedHours: parsed.data.estimatedHours ?? null,
-      createdBy: parsed.data.assignedTo,
+      createdBy: authUser.id,
       assignedBy: authUser.id
     });
 
@@ -179,7 +177,7 @@ export const getTasksByProject = async (req: Request, res: Response) => {
       return forbidden(res, "Access denied");
     }
 
-    const hasManagerAccess = hasProjectManagerAccess(project, authUser.id, authUser.role);
+    const hasManagerAccess = isProjectLeader(project, authUser.id);
     const hasMemberAccess = isProjectMember(project, authUser.id);
 
     if (!hasManagerAccess && !hasMemberAccess) {
@@ -265,17 +263,6 @@ export const getTaskWorkLogs = async (req: Request, res: Response) => {
       return forbidden(res, "Access denied");
     }
 
-    const access = await getTaskAccessContext(parsedParam.data.id, authUser.id, authUser.role);
-    if (!access.task) {
-      return notFound(res, "Task not found");
-    }
-    if (!access.project) {
-      return notFound(res, "Project not found");
-    }
-    if (!access.canAccess) {
-      return forbidden(res, "Access denied");
-    }
-
     const summary = await getTaskWorkLogSummary(parsedParam.data.id);
     return ok(res, "Task work logs fetched successfully", summary);
   } catch (error) {
@@ -301,23 +288,13 @@ export const createTaskWorkLog = async (req: Request, res: Response) => {
       return forbidden(res, "Access denied");
     }
 
-    const access = await getTaskAccessContext(parsedParam.data.id, authUser.id, authUser.role);
-    if (!access.task) {
-      return notFound(res, "Task not found");
-    }
-    if (!access.project) {
-      return notFound(res, "Project not found");
-    }
-    if (!access.canAccess) {
-      return forbidden(res, "Access denied");
-    }
+    const access = (req as TaskAccessRequest).taskAccess;
+    if (!access) return forbidden(res, "Access denied");
 
-    const canLogWork =
-      (authUser.role === "employee" || authUser.role === "teamLeader") &&
-      String(access.task.assignedTo) === String(authUser.id);
+    const canLogWork = access.isAssignedMember && canUpdateOwnTaskProgress(authUser.role);
 
     if (!canLogWork) {
-      return forbidden(res, "Only the assigned employee or team leader can add work logs");
+      return forbidden(res, "Only the assigned member can add work logs");
     }
 
     if (access.task.status === "Completed") {
@@ -524,7 +501,6 @@ export const updateTask = async (req: Request, res: Response) => {
       { _id: parsedParam.data.id, isDeleted: false },
       {
         ...parsedBody.data,
-        ...(parsedBody.data.assignedTo ? { createdBy: parsedBody.data.assignedTo } : {})
       },
       { returnDocument: "after" }
     )
@@ -582,43 +558,23 @@ export const updateTaskStatus = async (req: Request, res: Response) => {
       return forbidden(res, "Access denied");
     }
 
-    const task = await Task.findOne({ _id: parsedParam.data.id, isDeleted: false })
-      .select("_id projectId assignedTo status title")
-      .lean();
-    if (!task) {
-      return notFound(res, "Task not found");
-    }
+    const access = (req as TaskAccessRequest).taskAccess;
+    if (!access) return forbidden(res, "Access denied");
 
-    if (canUpdateOwnTaskProgress(authUser.role)) {
-      if (String(task.assignedTo) !== String(authUser.id)) {
-        return forbidden(res, "Access denied");
-      }
+    const task = access.task;
+    const allowedTransitions = access.isProjectLeader
+      ? TASK_TEAM_LEADER_STATUS_TRANSITIONS[task.status]
+      : access.isAssignedMember && canUpdateOwnTaskProgress(authUser.role)
+        ? TASK_MEMBER_STATUS_TRANSITIONS[task.status]
+        : [];
 
-      const nextAllowed = TASK_STATUS_FLOW[task.status];
-      if (!nextAllowed) {
-        return badRequest(res, "Task is already completed");
-      }
-      if (parsedBody.data.status !== nextAllowed) {
-        return badRequest(res, `Invalid status transition. Allowed: ${task.status} to ${nextAllowed}`);
-      }
-      if (parsedBody.data.status === "Completed") {
-        return forbidden(res, "Employee cannot mark task as completed");
-      }
-    } else if (canManageProjectTasks(authUser.role)) {
-      const project = await ensureProjectExists(String(task.projectId));
-      if (!project) {
-        return notFound(res, "Project not found");
-      }
-      const hasManagerAccess =
-        authUser.role === "teamLeader"
-          ? await isManagedByTeamLeader(String(task.assignedTo), authUser.id)
-          : hasProjectManagerAccess(project, authUser.id, authUser.role);
-
-      if (!hasManagerAccess) {
-        return forbidden(res, "Access denied");
-      }
-    } else {
-      return forbidden(res, "Access denied");
+    if (!allowedTransitions.includes(parsedBody.data.status)) {
+      return badRequest(
+        res,
+        allowedTransitions.length
+          ? `Invalid status transition. Allowed: ${task.status} -> ${allowedTransitions.join(", ")}`
+          : `Invalid status transition from ${task.status}`
+      );
     }
 
     const updated = await Task.findOneAndUpdate(
