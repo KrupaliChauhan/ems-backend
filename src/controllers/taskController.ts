@@ -18,6 +18,7 @@ import { getRequestAuthUser } from "../utils/requestContext";
 import {
   TASK_MEMBER_STATUS_TRANSITIONS,
   TASK_TEAM_LEADER_STATUS_TRANSITIONS,
+  canManageAllProjects,
   ensureEmployeeEligible,
   ensureProjectExists,
   ensureTaskExists,
@@ -177,7 +178,7 @@ export const getTasksByProject = async (req: Request, res: Response) => {
       return forbidden(res, "Access denied");
     }
 
-    const hasManagerAccess = isProjectLeader(project, authUser.id);
+    const hasManagerAccess = canManageAllProjects(authUser.role) || isProjectLeader(project, authUser.id);
     const hasMemberAccess = isProjectMember(project, authUser.id);
 
     if (!hasManagerAccess && !hasMemberAccess) {
@@ -562,8 +563,10 @@ export const updateTaskStatus = async (req: Request, res: Response) => {
     if (!access) return forbidden(res, "Access denied");
 
     const task = access.task;
-    const allowedTransitions = access.isProjectLeader
-      ? TASK_TEAM_LEADER_STATUS_TRANSITIONS[task.status]
+    const allowedTransitions = access.isPrivilegedManager
+      ? ["Pending", "In Progress", "In Review", "Completed"].filter((status) => status !== task.status)
+      : access.isProjectLeader
+        ? TASK_TEAM_LEADER_STATUS_TRANSITIONS[task.status]
       : access.isAssignedMember && canUpdateOwnTaskProgress(authUser.role)
         ? TASK_MEMBER_STATUS_TRANSITIONS[task.status]
         : [];

@@ -19,7 +19,7 @@ export const TASK_TEAM_LEADER_STATUS_TRANSITIONS: Record<TaskStatus, TaskStatus[
 };
 
 export function canManageAllProjects(role?: string) {
-  return role === "superadmin" || role === "admin";
+  return role === "superadmin" || role === "admin" || role === "HR";
 }
 
 export async function ensureProjectExists(projectId: string) {

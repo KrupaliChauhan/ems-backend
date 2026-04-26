@@ -37,7 +37,7 @@ export function isValidObjectId(id: string) {
 }
 
 export function isPrivilegedProjectManager(role?: string) {
-  return role === "superadmin" || role === "admin";
+  return role === "superadmin" || role === "admin" || role === "HR";
 }
 
 export function isTeamLeader(role?: string) {

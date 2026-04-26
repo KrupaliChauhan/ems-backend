@@ -2,13 +2,14 @@ import type { NextFunction, Request, Response } from "express";
 import mongoose from "mongoose";
 import { forbidden, notFound } from "../utils/apiResponse";
 import { getRequestAuthUser } from "../utils/requestContext";
-import { ensureProjectExists, ensureTaskExists, isProjectLeader } from "../services/taskService";
+import { canManageAllProjects, ensureProjectExists, ensureTaskExists, isProjectLeader } from "../services/taskService";
 
 export type TaskAccessContext = {
   task: NonNullable<Awaited<ReturnType<typeof ensureTaskExists>>>;
   project: NonNullable<Awaited<ReturnType<typeof ensureProjectExists>>>;
   isAssignedMember: boolean;
   isProjectLeader: boolean;
+  isPrivilegedManager: boolean;
 };
 
 export type TaskAccessRequest = Request & {
@@ -35,8 +36,9 @@ export async function requireTaskAccess(req: Request, res: Response, next: NextF
 
   const isAssignedMember = String(task.assignedTo) === String(authUser.id);
   const hasLeaderAccess = isProjectLeader(project, authUser.id);
+  const isPrivilegedManager = canManageAllProjects(authUser.role);
 
-  if (!isAssignedMember && !hasLeaderAccess) {
+  if (!isAssignedMember && !hasLeaderAccess && !isPrivilegedManager) {
     return forbidden(res, "Access denied");
   }
 
@@ -44,7 +46,8 @@ export async function requireTaskAccess(req: Request, res: Response, next: NextF
     task,
     project,
     isAssignedMember,
-    isProjectLeader: hasLeaderAccess
+    isProjectLeader: hasLeaderAccess,
+    isPrivilegedManager
   };
 
   next();
